@@ -25,7 +25,10 @@ const CONCEPT_KEYWORDS = {
 };
 
 const autofillSessionState = new WeakMap();
+const manualLearnState = new WeakMap();
 let learningListenersAttached = false;
+let manualLearningEnabled = false;
+let cachedAliasModel = {};
 
 function cleanText(value) {
   return (value || "").replace(/\s+/g, " ").trim();
@@ -41,6 +44,10 @@ function tokenizeText(value) {
     .split(/[^a-z0-9]+/)
     .map((token) => normalizeToken(token))
     .filter((token) => token.length > 1);
+}
+
+function normalizeIdentity(value) {
+  return cleanText(value).toLowerCase();
 }
 
 function getLabelText(element) {
@@ -219,6 +226,8 @@ function collectFilledFields() {
 
     fields.push({
       key: fieldKey(element),
+      name: meta.name,
+      id: meta.id,
       selector: buildSelector(element),
       label: meta.label,
       type: meta.type,
@@ -259,23 +268,65 @@ function attachLearningListeners() {
     }
 
     const state = autofillSessionState.get(element);
-    if (!state || state.learned) {
+    const currentValue = typeof element.value === "string" ? element.value.trim() : "";
+    if (!currentValue) {
       return;
     }
 
-    const currentValue = typeof element.value === "string" ? element.value.trim() : "";
-    if (!currentValue || currentValue === state.autofilledValue) {
+    if (state && !state.learned) {
+      if (currentValue === state.autofilledValue) {
+        return;
+      }
+
+      const meta = buildFieldMeta(element);
+      const learning = inferConcept(meta, state.aliasModel || cachedAliasModel || {});
+      const learnedField = {
+        key: fieldKey(element),
+        name: meta.name,
+        id: meta.id,
+        selector: buildSelector(element),
+        label: meta.label,
+        type: meta.type,
+        canonicalConcept: learning.canonicalConcept || state.canonicalConcept || "",
+        tokens: learning.tokens,
+        value: currentValue
+      };
+
+      chrome.runtime.sendMessage(
+        {
+          action: "saveFields",
+          fields: [learnedField]
+        },
+        () => {
+          autofillSessionState.set(element, {
+            ...state,
+            learned: true
+          });
+          manualLearnState.set(element, currentValue);
+        }
+      );
+      return;
+    }
+
+    if (!manualLearningEnabled) {
+      return;
+    }
+
+    const lastSavedValue = manualLearnState.get(element);
+    if (lastSavedValue === currentValue) {
       return;
     }
 
     const meta = buildFieldMeta(element);
-    const learning = inferConcept(meta, state.aliasModel || {});
+    const learning = inferConcept(meta, cachedAliasModel || {});
     const learnedField = {
       key: fieldKey(element),
+      name: meta.name,
+      id: meta.id,
       selector: buildSelector(element),
       label: meta.label,
       type: meta.type,
-      canonicalConcept: learning.canonicalConcept || state.canonicalConcept || "",
+      canonicalConcept: learning.canonicalConcept,
       tokens: learning.tokens,
       value: currentValue
     };
@@ -286,10 +337,7 @@ function attachLearningListeners() {
         fields: [learnedField]
       },
       () => {
-        autofillSessionState.set(element, {
-          ...state,
-          learned: true
-        });
+        manualLearnState.set(element, currentValue);
       }
     );
   };
@@ -318,10 +366,39 @@ function jaccardSimilarity(tokensA, tokensB) {
 }
 
 function computeMatchScore(target, candidate) {
+  if (
+    target.canonicalConcept &&
+    candidate.canonicalConcept &&
+    target.canonicalConcept !== candidate.canonicalConcept
+  ) {
+    return -1000;
+  }
+
   let score = 0;
 
   if (target.canonicalConcept && candidate.canonicalConcept && target.canonicalConcept === candidate.canonicalConcept) {
     score += 5;
+  }
+
+  const targetName = normalizeIdentity(target.name);
+  const candidateName = normalizeIdentity(candidate.name);
+  const targetId = normalizeIdentity(target.id);
+  const candidateId = normalizeIdentity(candidate.id);
+
+  if (targetName && candidateName) {
+    if (targetName === candidateName) {
+      score += 4;
+    } else if (targetName.length >= 4 && candidateName.length >= 4 && (targetName.includes(candidateName) || candidateName.includes(targetName))) {
+      score += 2;
+    }
+  }
+
+  if (targetId && candidateId) {
+    if (targetId === candidateId) {
+      score += 4;
+    } else if (targetId.length >= 4 && candidateId.length >= 4 && (targetId.includes(candidateId) || candidateId.includes(targetId))) {
+      score += 2;
+    }
   }
 
   if (target.key && candidate.key && target.key === candidate.key) {
@@ -336,8 +413,34 @@ function computeMatchScore(target, candidate) {
   return score;
 }
 
+function isLikelyUrlField(target) {
+  const fieldType = normalizeIdentity(target.type);
+  return (
+    fieldType === "url" ||
+    (target.tokens || []).some((token) => ["url", "link", "linkedin", "github", "portfolio", "website"].includes(token))
+  );
+}
+
+function hasStrongIdentityMatch(target, candidate) {
+  if (!candidate) {
+    return false;
+  }
+
+  const targetName = normalizeIdentity(target.name);
+  const candidateName = normalizeIdentity(candidate.name);
+  const targetId = normalizeIdentity(target.id);
+  const candidateId = normalizeIdentity(candidate.id);
+
+  return (
+    (target.key && candidate.key && target.key === candidate.key) ||
+    (targetName && candidateName && targetName === candidateName) ||
+    (targetId && candidateId && targetId === candidateId)
+  );
+}
+
 function autofillFields(savedFields, aliasModel) {
   attachLearningListeners();
+  cachedAliasModel = aliasModel || {};
 
   const nodes = Array.from(document.querySelectorAll("input, textarea, select"));
   const candidates = Array.isArray(savedFields) ? savedFields : [];
@@ -357,6 +460,8 @@ function autofillFields(savedFields, aliasModel) {
     const learning = inferConcept(meta, aliasModel || {});
     const target = {
       key: fieldKey(element),
+      name: meta.name,
+      id: meta.id,
       type: meta.type,
       canonicalConcept: learning.canonicalConcept,
       tokens: learning.tokens
@@ -373,16 +478,30 @@ function autofillFields(savedFields, aliasModel) {
       }
     }
 
-    const value = bestScore >= 3 ? bestCandidate?.value : null;
+    let minimumScore = 3;
+    if (isLikelyUrlField(target)) {
+      minimumScore = 5;
+    }
+
+    if (target.canonicalConcept) {
+      minimumScore = Math.max(minimumScore, 3.5);
+    }
+
+    const strongIdentityMatch = hasStrongIdentityMatch(target, bestCandidate);
+    const bestConcept = bestCandidate?.canonicalConcept || "";
+    const conceptConflict = Boolean(target.canonicalConcept && bestConcept && target.canonicalConcept !== bestConcept);
+    const conceptWeakForUrl = isLikelyUrlField(target) && !strongIdentityMatch && !target.canonicalConcept;
+
+    const value = !conceptConflict && !conceptWeakForUrl && bestScore >= minimumScore ? bestCandidate?.value : null;
 
     if (typeof value === "string" && value.length > 0) {
-      applyValue(element, value);
       autofillSessionState.set(element, {
         autofilledValue: value.trim(),
         canonicalConcept: bestCandidate?.canonicalConcept || target.canonicalConcept || "",
         aliasModel: aliasModel || {},
         learned: false
       });
+      applyValue(element, value);
       filledCount += 1;
     }
   }
@@ -400,6 +519,13 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (message.action === "autofillFields") {
       const filledCount = autofillFields(message.fields || [], message.aliasModel || {});
       sendResponse({ ok: true, filledCount });
+      return;
+    }
+
+    if (message.action === "setManualLearning") {
+      manualLearningEnabled = Boolean(message.enabled);
+      attachLearningListeners();
+      sendResponse({ ok: true, enabled: manualLearningEnabled });
       return;
     }
 

@@ -23,6 +23,7 @@ The extension uses a lightweight local learning model (no cloud calls):
 - It treats common variants as equivalent (for example `phone`, `cell`, `mobile`, `telephone`).
 - It learns token-to-concept associations over time from fields you save.
 - After autofill, if you edit a filled field, it learns from your correction and saves that field/value mapping for future forms.
+- You can enable **Learn from manual typing** in the popup to also learn from fields you type yourself (even if they were not autofilled first).
 - Autofill picks the best candidate using concept + token similarity scoring.
 
 This gives you practical cross-site behavior, such as matching a saved phone value to fields labeled differently on another ATS.

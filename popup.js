@@ -3,6 +3,7 @@ const unlockBtn = document.getElementById("unlockBtn");
 const lockBtn = document.getElementById("lockBtn");
 const saveBtn = document.getElementById("saveBtn");
 const fillBtn = document.getElementById("fillBtn");
+const manualLearnToggle = document.getElementById("manualLearnToggle");
 const statusEl = document.getElementById("status");
 
 function setStatus(text, isError = false) {
@@ -33,6 +34,28 @@ function sendTabMessage(tabId, message) {
 async function getActiveTab() {
   const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
   return tabs[0];
+}
+
+async function syncManualLearningToActiveTab() {
+  const tab = await getActiveTab();
+  if (!tab?.id) {
+    return;
+  }
+
+  await sendTabMessage(tab.id, {
+    action: "setManualLearning",
+    enabled: Boolean(manualLearnToggle.checked)
+  });
+}
+
+async function refreshSettings() {
+  const response = await sendRuntimeMessage({ action: "getSettings" });
+  if (!response.ok) {
+    setStatus(response.error || "Failed to load settings.", true);
+    return;
+  }
+
+  manualLearnToggle.checked = Boolean(response.settings?.learnFromManualInput);
 }
 
 async function refreshLockState() {
@@ -137,4 +160,25 @@ fillBtn.addEventListener("click", async () => {
   setStatus(`Autofilled ${result.filledCount} field(s).`);
 });
 
-document.addEventListener("DOMContentLoaded", refreshLockState);
+manualLearnToggle.addEventListener("change", async () => {
+  const response = await sendRuntimeMessage({
+    action: "updateSettings",
+    settings: {
+      learnFromManualInput: Boolean(manualLearnToggle.checked)
+    }
+  });
+
+  if (!response.ok) {
+    setStatus(response.error || "Failed to update settings.", true);
+    return;
+  }
+
+  await syncManualLearningToActiveTab();
+  setStatus(manualLearnToggle.checked ? "Manual learning enabled." : "Manual learning disabled.");
+});
+
+document.addEventListener("DOMContentLoaded", async () => {
+  await refreshSettings();
+  await refreshLockState();
+  await syncManualLearningToActiveTab();
+});

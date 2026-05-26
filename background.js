@@ -1,7 +1,35 @@
 const VAULT_KEY = "secureVault";
 const VAULT_META_KEY = "secureVaultMeta";
 const PASSPHRASE_SESSION_KEY = "vaultPassphrase";
+const SETTINGS_KEY = "extensionSettings";
 const PBKDF2_ITERATIONS = 250000;
+
+function defaultSettings() {
+  return {
+    learnFromManualInput: false
+  };
+}
+
+async function getSettings() {
+  const data = await chrome.storage.local.get(SETTINGS_KEY);
+  const saved = data[SETTINGS_KEY] && typeof data[SETTINGS_KEY] === "object"
+    ? data[SETTINGS_KEY]
+    : {};
+  return {
+    ...defaultSettings(),
+    ...saved
+  };
+}
+
+async function updateSettings(partialSettings) {
+  const current = await getSettings();
+  const next = {
+    ...current,
+    ...(partialSettings && typeof partialSettings === "object" ? partialSettings : {})
+  };
+  await chrome.storage.local.set({ [SETTINGS_KEY]: next });
+  return next;
+}
 
 async function getOrCreateMeta() {
   const data = await chrome.storage.local.get(VAULT_META_KEY);
@@ -93,6 +121,8 @@ function sanitizeField(field) {
 
   return {
     key: field.key,
+    name: field.name || "",
+    id: field.id || "",
     selector: field.selector || "",
     label: field.label || "",
     type: field.type || "",
@@ -284,6 +314,16 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         case "getFields": {
           const result = await getGlobalFields();
           sendResponse({ ok: true, ...result });
+          break;
+        }
+        case "getSettings": {
+          const settings = await getSettings();
+          sendResponse({ ok: true, settings });
+          break;
+        }
+        case "updateSettings": {
+          const settings = await updateSettings(message.settings || {});
+          sendResponse({ ok: true, settings });
           break;
         }
         default:
