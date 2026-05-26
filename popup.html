@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Application Filler</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <main class="app">
+    <h1>Application Filler</h1>
+    <p class="subtitle">Securely save and autofill this site.</p>
+
+    <label for="passphrase">Passphrase</label>
+    <input id="passphrase" type="password" minlength="8" placeholder="At least 8 characters" />
+
+    <div class="actions">
+      <button id="unlockBtn" class="primary">Unlock</button>
+      <button id="lockBtn" class="secondary">Lock</button>
+    </div>
+
+    <hr />
+
+    <div class="actions column">
+      <button id="saveBtn" class="primary">Save Filled Fields</button>
+      <button id="fillBtn" class="secondary">Autofill This Page</button>
+    </div>
+
+    <p id="status" class="status">Vault locked.</p>
+  </main>
+  <script src="popup.js"></script>
+</body>
+</html>

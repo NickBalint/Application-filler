@@ -1,0 +1,102 @@
+:root {
+  --bg: #f6f7fb;
+  --panel: #ffffff;
+  --text: #1e2430;
+  --muted: #5b667a;
+  --line: #dbe0ea;
+  --primary: #1e5eff;
+  --primary-strong: #0f4ee8;
+  --secondary: #eef2ff;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+  background: radial-gradient(circle at top left, #ffffff, var(--bg));
+  color: var(--text);
+  min-width: 320px;
+}
+
+.app {
+  padding: 14px;
+}
+
+h1 {
+  margin: 0;
+  font-size: 1.05rem;
+}
+
+.subtitle {
+  margin: 6px 0 12px;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+label {
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+
+input {
+  width: 100%;
+  margin-top: 6px;
+  margin-bottom: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 9px 10px;
+  font-size: 0.9rem;
+}
+
+.actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.actions.column {
+  grid-template-columns: 1fr;
+}
+
+button {
+  border: none;
+  border-radius: 8px;
+  padding: 9px 10px;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.primary {
+  background: var(--primary);
+  color: #ffffff;
+}
+
+.primary:hover {
+  background: var(--primary-strong);
+}
+
+.secondary {
+  background: var(--secondary);
+  color: var(--text);
+}
+
+hr {
+  margin: 14px 0;
+  border: 0;
+  border-top: 1px solid var(--line);
+}
+
+.status {
+  margin-top: 10px;
+  font-size: 0.82rem;
+  color: var(--muted);
+  min-height: 1.2em;
+}
