@@ -11,6 +11,16 @@
     <h1>Application Filler</h1>
     <p class="subtitle">Securely save once and autofill across sites.</p>
 
+    <label for="profileSelect">Username</label>
+    <select id="profileSelect"></select>
+
+    <div class="actions">
+      <input id="newProfileName" type="text" placeholder="new username" />
+      <button id="createProfileBtn" class="secondary">Create</button>
+    </div>
+
+    <button id="switchProfileBtn" class="secondary profile-switch">Switch User</button>
+
     <label for="passphrase">Passphrase</label>
     <input id="passphrase" type="password" minlength="8" placeholder="At least 8 characters" />
 

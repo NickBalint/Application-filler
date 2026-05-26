@@ -51,10 +51,32 @@ input {
   font-size: 0.9rem;
 }
 
+select {
+  width: 100%;
+  margin-top: 6px;
+  margin-bottom: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 9px 10px;
+  font-size: 0.9rem;
+  background: #ffffff;
+  color: var(--text);
+}
+
 .actions {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 8px;
+}
+
+.actions input {
+  margin: 0;
+}
+
+.profile-switch {
+  width: 100%;
+  margin-top: 8px;
+  margin-bottom: 12px;
 }
 
 .actions.column {
