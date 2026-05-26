@@ -8,8 +8,39 @@ const IGNORED_INPUT_TYPES = new Set([
   "password"
 ]);
 
+const CONCEPT_KEYWORDS = {
+  phone: ["phone", "cell", "mobile", "telephone", "tel", "phonenumber", "cellphone", "mobilephone"],
+  email: ["email", "e-mail", "mail"],
+  first_name: ["first", "firstname", "given", "forename"],
+  last_name: ["last", "lastname", "surname", "familyname"],
+  full_name: ["fullname", "full", "name", "legalname"],
+  linkedin: ["linkedin", "linked", "linkedinurl"],
+  github: ["github", "git"],
+  website: ["website", "site", "url", "portfolio", "personal", "homepage"],
+  address: ["address", "street", "addr", "line1", "line2"],
+  city: ["city", "town"],
+  state: ["state", "province", "region"],
+  zip: ["zip", "zipcode", "postal", "postcode"],
+  country: ["country", "nation"]
+};
+
+const autofillSessionState = new WeakMap();
+let learningListenersAttached = false;
+
 function cleanText(value) {
   return (value || "").replace(/\s+/g, " ").trim();
+}
+
+function normalizeToken(value) {
+  return value.toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function tokenizeText(value) {
+  return cleanText(value)
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .map((token) => normalizeToken(token))
+    .filter((token) => token.length > 1);
 }
 
 function getLabelText(element) {
@@ -98,6 +129,65 @@ function fieldKey(element) {
   return buildSelector(element).toLowerCase();
 }
 
+function buildFieldMeta(element) {
+  return {
+    name: cleanText(element.name || ""),
+    id: cleanText(element.id || ""),
+    label: getLabelText(element),
+    placeholder: cleanText(element.placeholder || ""),
+    autocomplete: cleanText(element.getAttribute("autocomplete") || ""),
+    type: cleanText(element.type || element.tagName || "")
+  };
+}
+
+function inferConcept(meta, aliasModel = {}) {
+  const tokens = Array.from(
+    new Set(
+      [meta.name, meta.id, meta.label, meta.placeholder, meta.autocomplete, meta.type]
+        .flatMap((part) => tokenizeText(part))
+    )
+  );
+
+  const scores = new Map();
+
+  for (const [concept, keywords] of Object.entries(CONCEPT_KEYWORDS)) {
+    for (const token of tokens) {
+      if (keywords.includes(token)) {
+        scores.set(concept, (scores.get(concept) || 0) + 3);
+      }
+      for (const keyword of keywords) {
+        if (token.includes(keyword) || keyword.includes(token)) {
+          scores.set(concept, (scores.get(concept) || 0) + 1);
+        }
+      }
+    }
+  }
+
+  for (const token of tokens) {
+    const learned = aliasModel[token];
+    if (!learned || typeof learned !== "object") {
+      continue;
+    }
+    for (const [concept, count] of Object.entries(learned)) {
+      scores.set(concept, (scores.get(concept) || 0) + Math.min(Number(count) || 0, 5));
+    }
+  }
+
+  let bestConcept = "";
+  let bestScore = 0;
+  for (const [concept, score] of scores.entries()) {
+    if (score > bestScore) {
+      bestConcept = concept;
+      bestScore = score;
+    }
+  }
+
+  return {
+    canonicalConcept: bestScore >= 3 ? bestConcept : "",
+    tokens
+  };
+}
+
 function isCandidateField(element) {
   if (!(element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement || element instanceof HTMLSelectElement)) {
     return false;
@@ -124,10 +214,16 @@ function collectFilledFields() {
       continue;
     }
 
+    const meta = buildFieldMeta(element);
+    const learning = inferConcept(meta);
+
     fields.push({
       key: fieldKey(element),
       selector: buildSelector(element),
-      label: getLabelText(element),
+      label: meta.label,
+      type: meta.type,
+      canonicalConcept: learning.canonicalConcept,
+      tokens: learning.tokens,
       value
     });
   }
@@ -151,19 +247,100 @@ function applyValue(element, value) {
   element.dispatchEvent(new Event("change", { bubbles: true }));
 }
 
-function autofillFields(savedFields) {
-  const nodes = Array.from(document.querySelectorAll("input, textarea, select"));
-  const byKey = new Map();
-  const bySelector = new Map();
+function attachLearningListeners() {
+  if (learningListenersAttached) {
+    return;
+  }
 
-  for (const field of savedFields || []) {
-    if (field.key) {
-      byKey.set(field.key, field.value);
+  const maybeLearnFromEdit = (event) => {
+    const element = event.target;
+    if (!isCandidateField(element)) {
+      return;
     }
-    if (field.selector) {
-      bySelector.set(field.selector, field.value);
+
+    const state = autofillSessionState.get(element);
+    if (!state || state.learned) {
+      return;
+    }
+
+    const currentValue = typeof element.value === "string" ? element.value.trim() : "";
+    if (!currentValue || currentValue === state.autofilledValue) {
+      return;
+    }
+
+    const meta = buildFieldMeta(element);
+    const learning = inferConcept(meta, state.aliasModel || {});
+    const learnedField = {
+      key: fieldKey(element),
+      selector: buildSelector(element),
+      label: meta.label,
+      type: meta.type,
+      canonicalConcept: learning.canonicalConcept || state.canonicalConcept || "",
+      tokens: learning.tokens,
+      value: currentValue
+    };
+
+    chrome.runtime.sendMessage(
+      {
+        action: "saveFields",
+        fields: [learnedField]
+      },
+      () => {
+        autofillSessionState.set(element, {
+          ...state,
+          learned: true
+        });
+      }
+    );
+  };
+
+  document.addEventListener("change", maybeLearnFromEdit, true);
+  document.addEventListener("blur", maybeLearnFromEdit, true);
+  learningListenersAttached = true;
+}
+
+function jaccardSimilarity(tokensA, tokensB) {
+  const a = new Set(tokensA || []);
+  const b = new Set(tokensB || []);
+  if (a.size === 0 || b.size === 0) {
+    return 0;
+  }
+
+  let intersection = 0;
+  for (const token of a.values()) {
+    if (b.has(token)) {
+      intersection += 1;
     }
   }
+
+  const union = new Set([...a.values(), ...b.values()]).size;
+  return union > 0 ? intersection / union : 0;
+}
+
+function computeMatchScore(target, candidate) {
+  let score = 0;
+
+  if (target.canonicalConcept && candidate.canonicalConcept && target.canonicalConcept === candidate.canonicalConcept) {
+    score += 5;
+  }
+
+  if (target.key && candidate.key && target.key === candidate.key) {
+    score += 3;
+  }
+
+  if (target.type && candidate.type && target.type === candidate.type) {
+    score += 1;
+  }
+
+  score += jaccardSimilarity(target.tokens, candidate.tokens) * 4;
+  return score;
+}
+
+function autofillFields(savedFields, aliasModel) {
+  attachLearningListeners();
+
+  const nodes = Array.from(document.querySelectorAll("input, textarea, select"));
+  const candidates = Array.isArray(savedFields) ? savedFields : [];
 
   let filledCount = 0;
 
@@ -172,12 +349,40 @@ function autofillFields(savedFields) {
       continue;
     }
 
-    const selector = buildSelector(element);
-    const key = fieldKey(element);
-    const value = bySelector.get(selector) ?? byKey.get(key);
+    if (typeof element.value === "string" && element.value.trim()) {
+      continue;
+    }
+
+    const meta = buildFieldMeta(element);
+    const learning = inferConcept(meta, aliasModel || {});
+    const target = {
+      key: fieldKey(element),
+      type: meta.type,
+      canonicalConcept: learning.canonicalConcept,
+      tokens: learning.tokens
+    };
+
+    let bestCandidate = null;
+    let bestScore = 0;
+
+    for (const candidate of candidates) {
+      const score = computeMatchScore(target, candidate);
+      if (score > bestScore) {
+        bestScore = score;
+        bestCandidate = candidate;
+      }
+    }
+
+    const value = bestScore >= 3 ? bestCandidate?.value : null;
 
     if (typeof value === "string" && value.length > 0) {
       applyValue(element, value);
+      autofillSessionState.set(element, {
+        autofilledValue: value.trim(),
+        canonicalConcept: bestCandidate?.canonicalConcept || target.canonicalConcept || "",
+        aliasModel: aliasModel || {},
+        learned: false
+      });
       filledCount += 1;
     }
   }
@@ -193,7 +398,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     }
 
     if (message.action === "autofillFields") {
-      const filledCount = autofillFields(message.fields || []);
+      const filledCount = autofillFields(message.fields || [], message.aliasModel || {});
       sendResponse({ ok: true, filledCount });
       return;
     }

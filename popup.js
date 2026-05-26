@@ -93,7 +93,6 @@ saveBtn.addEventListener("click", async () => {
 
   const saved = await sendRuntimeMessage({
     action: "saveFields",
-    hostname: collected.hostname,
     fields: collected.fields
   });
 
@@ -102,7 +101,7 @@ saveBtn.addEventListener("click", async () => {
     return;
   }
 
-  setStatus(`Saved ${saved.savedCount} field(s) for ${collected.hostname}.`);
+  setStatus(`Saved ${saved.savedCount} field(s) to your secure profile.`);
 });
 
 fillBtn.addEventListener("click", async () => {
@@ -112,8 +111,7 @@ fillBtn.addEventListener("click", async () => {
     return;
   }
 
-  const url = new URL(tab.url);
-  const fieldsResp = await sendRuntimeMessage({ action: "getFields", hostname: url.hostname });
+  const fieldsResp = await sendRuntimeMessage({ action: "getFields" });
 
   if (!fieldsResp.ok) {
     setStatus(fieldsResp.error || "Failed to load saved fields.", true);
@@ -121,13 +119,14 @@ fillBtn.addEventListener("click", async () => {
   }
 
   if (!fieldsResp.fields || fieldsResp.fields.length === 0) {
-    setStatus("No saved fields for this site yet.", true);
+    setStatus("No saved profile fields yet.", true);
     return;
   }
 
   const result = await sendTabMessage(tab.id, {
     action: "autofillFields",
-    fields: fieldsResp.fields
+    fields: fieldsResp.fields,
+    aliasModel: fieldsResp.aliasModel || {}
   });
 
   if (!result.ok) {

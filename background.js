@@ -80,9 +80,54 @@ function base64ToArrayBuffer(base64) {
 
 function defaultVault() {
   return {
-    version: 1,
-    domains: {}
+    version: 2,
+    profileFields: [],
+    aliasModel: {}
   };
+}
+
+function sanitizeField(field) {
+  const tokens = Array.isArray(field.tokens)
+    ? field.tokens.filter((token) => typeof token === "string" && token.length > 1)
+    : [];
+
+  return {
+    key: field.key,
+    selector: field.selector || "",
+    label: field.label || "",
+    type: field.type || "",
+    canonicalConcept: field.canonicalConcept || "",
+    tokens: Array.from(new Set(tokens)),
+    value: field.value,
+    updatedAt: Date.now()
+  };
+}
+
+function ensureVaultShape(vault) {
+  if (!vault || typeof vault !== "object") {
+    return defaultVault();
+  }
+
+  const normalized = {
+    version: 2,
+    profileFields: Array.isArray(vault.profileFields) ? vault.profileFields : [],
+    aliasModel: vault.aliasModel && typeof vault.aliasModel === "object" ? vault.aliasModel : {}
+  };
+
+  if (normalized.profileFields.length === 0 && vault.domains && typeof vault.domains === "object") {
+    const migrated = [];
+    for (const domainData of Object.values(vault.domains)) {
+      const fields = Array.isArray(domainData?.fields) ? domainData.fields : [];
+      for (const field of fields) {
+        if (field && field.key && typeof field.value === "string") {
+          migrated.push(sanitizeField(field));
+        }
+      }
+    }
+    normalized.profileFields = migrated;
+  }
+
+  return normalized;
 }
 
 async function loadVault(passphrase) {
@@ -130,65 +175,74 @@ async function saveVault(passphrase, vaultData) {
   });
 }
 
-function normalizeDomain(hostname) {
-  return hostname.replace(/^www\./, "").toLowerCase();
-}
-
-function mergeDomainFields(existingFields, incomingFields) {
+function mergeProfileFields(existingFields, incomingFields) {
   const byKey = new Map();
 
   for (const field of existingFields) {
-    byKey.set(field.key, field);
+    const modelKey = field.canonicalConcept
+      ? `concept:${field.canonicalConcept}`
+      : `field:${field.key}`;
+    byKey.set(modelKey, field);
   }
 
   for (const field of incomingFields) {
-    byKey.set(field.key, {
-      key: field.key,
-      selector: field.selector,
-      label: field.label,
-      value: field.value,
-      updatedAt: Date.now()
-    });
+    const modelKey = field.canonicalConcept
+      ? `concept:${field.canonicalConcept}`
+      : `field:${field.key}`;
+    byKey.set(modelKey, field);
   }
 
   return Array.from(byKey.values());
 }
 
-async function saveFieldsToVault(hostname, fields) {
+function updateAliasModel(aliasModel, fields) {
+  const model = aliasModel && typeof aliasModel === "object" ? aliasModel : {};
+
+  for (const field of fields) {
+    if (!field.canonicalConcept) {
+      continue;
+    }
+
+    for (const token of field.tokens || []) {
+      if (!model[token]) {
+        model[token] = {};
+      }
+      model[token][field.canonicalConcept] = (model[token][field.canonicalConcept] || 0) + 1;
+    }
+  }
+
+  return model;
+}
+
+async function saveFieldsToVault(fields) {
   const passphrase = await getPassphrase();
   if (!passphrase) {
     throw new Error("Vault is locked. Unlock first.");
   }
 
-  const vault = await loadVault(passphrase);
-  const domain = normalizeDomain(hostname);
-  const current = vault.domains[domain] || { fields: [] };
+  const vault = ensureVaultShape(await loadVault(passphrase));
   const sanitizedFields = fields
     .filter((field) => field && field.key && typeof field.value === "string")
-    .map((field) => ({
-      key: field.key,
-      selector: field.selector || "",
-      label: field.label || "",
-      value: field.value
-    }));
+    .map((field) => sanitizeField(field));
 
-  vault.domains[domain] = {
-    fields: mergeDomainFields(current.fields, sanitizedFields)
-  };
+  vault.profileFields = mergeProfileFields(vault.profileFields, sanitizedFields);
+  vault.aliasModel = updateAliasModel(vault.aliasModel, sanitizedFields);
 
   await saveVault(passphrase, vault);
   return { savedCount: sanitizedFields.length };
 }
 
-async function getFieldsForDomain(hostname) {
+async function getGlobalFields() {
   const passphrase = await getPassphrase();
   if (!passphrase) {
     throw new Error("Vault is locked. Unlock first.");
   }
 
-  const vault = await loadVault(passphrase);
-  const domain = normalizeDomain(hostname);
-  return vault.domains[domain]?.fields || [];
+  const vault = ensureVaultShape(await loadVault(passphrase));
+  return {
+    fields: vault.profileFields || [],
+    aliasModel: vault.aliasModel || {}
+  };
 }
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
@@ -223,13 +277,13 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           break;
         }
         case "saveFields": {
-          const result = await saveFieldsToVault(message.hostname, message.fields || []);
+          const result = await saveFieldsToVault(message.fields || []);
           sendResponse({ ok: true, ...result });
           break;
         }
         case "getFields": {
-          const fields = await getFieldsForDomain(message.hostname);
-          sendResponse({ ok: true, fields });
+          const result = await getGlobalFields();
+          sendResponse({ ok: true, ...result });
           break;
         }
         default:
