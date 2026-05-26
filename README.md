@@ -9,10 +9,11 @@ Application Filler is a Chrome extension that helps you speed up job application
 ## What It Does
 
 1. You unlock the vault with a passphrase.
-2. Click **Save Filled Fields** to capture non-empty fields from the current page.
-3. Later, click **Autofill This Page** on any application page to fill matching fields.
+2. You choose a username profile (for example `nick`, `roommate`, `test-user`).
+3. Click **Save Filled Fields** to capture non-empty fields from the current page.
+4. Later, click **Autofill This Page** on any application page to fill matching fields.
 
-Saved data is stored as a global encrypted profile, not split per domain.
+Saved data is stored in encrypted local profiles by username, so users on the same computer stay separated.
 
 ## Smart Matching Model
 
@@ -54,9 +55,18 @@ Important:
 1. Open a job application page.
 2. Fill some fields manually.
 3. Click the extension icon.
-4. Enter a passphrase (8+ chars) and click **Unlock**.
-5. Click **Save Filled Fields**.
-6. On future application pages, click **Autofill This Page**.
+4. Choose a username from the dropdown (or create one).
+5. Enter a passphrase (8+ chars) and click **Unlock**.
+6. Click **Save Filled Fields**.
+7. On future application pages, click **Autofill This Page**.
+
+### Multiple Local Users
+
+1. Unlock once with any existing username profile.
+2. Enter a new username and click **Create**.
+3. Use **Switch User** to change the active profile.
+
+Each username has separate learned field mappings and values.
 
 ## Demo Starter Page
 
