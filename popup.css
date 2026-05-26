@@ -102,6 +102,10 @@ select {
   color: var(--muted);
 }
 
+.toggle-row input:disabled + span {
+  color: #98a2b3;
+}
+
 button {
   border: none;
   border-radius: 8px;
