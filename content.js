@@ -27,7 +27,6 @@ const CONCEPT_KEYWORDS = {
 const autofillSessionState = new WeakMap();
 const manualLearnState = new WeakMap();
 let learningListenersAttached = false;
-let manualLearningEnabled = true;
 let cachedAliasModel = {};
 
 function cleanText(value) {
@@ -274,7 +273,16 @@ function attachLearningListeners() {
     }
 
     if (state && !state.learned) {
+      const elapsedSinceAutofill = Math.max(0, Date.now() - Number(state.appliedAt || 0));
+
       if (currentValue === state.autofilledValue) {
+        if (!state.feedbackSent && event.type === "blur" && elapsedSinceAutofill >= 1200) {
+          sendFillFeedback(true);
+          autofillSessionState.set(element, {
+            ...state,
+            feedbackSent: true
+          });
+        }
         return;
       }
 
@@ -298,17 +306,17 @@ function attachLearningListeners() {
           fields: [learnedField]
         },
         () => {
+          if (!state.feedbackSent) {
+            sendFillFeedback(false);
+          }
           autofillSessionState.set(element, {
             ...state,
+            feedbackSent: true,
             learned: true
           });
           manualLearnState.set(element, currentValue);
         }
       );
-      return;
-    }
-
-    if (!manualLearningEnabled) {
       return;
     }
 
@@ -363,6 +371,54 @@ function jaccardSimilarity(tokensA, tokensB) {
 
   const union = new Set([...a.values(), ...b.values()]).size;
   return union > 0 ? intersection / union : 0;
+}
+
+function sigmoid(value) {
+  return 1 / (1 + Math.exp(-value));
+}
+
+function computeFillConfidence({
+  bestScore,
+  secondBestScore,
+  strongIdentityMatch,
+  exactConceptMatch,
+  hasTargetConcept,
+  isUrlField,
+  isTypedSensitiveField
+}) {
+  const scoreMargin = Math.max(0, bestScore - secondBestScore);
+
+  let logit = -4.8;
+  logit += bestScore * 0.55;
+  logit += scoreMargin * 0.9;
+  if (strongIdentityMatch) {
+    logit += 1.5;
+  }
+  if (exactConceptMatch) {
+    logit += 1.1;
+  }
+  if (hasTargetConcept) {
+    logit += 0.4;
+  }
+  if (isUrlField) {
+    logit -= 0.2;
+  }
+  if (isTypedSensitiveField) {
+    logit += 0.3;
+  }
+
+  return sigmoid(logit);
+}
+
+function clampNumber(value, min, max) {
+  return Math.min(max, Math.max(min, value));
+}
+
+function sendFillFeedback(accepted) {
+  chrome.runtime.sendMessage({
+    action: "recordFillFeedback",
+    accepted: Boolean(accepted)
+  });
 }
 
 function computeMatchScore(target, candidate) {
@@ -622,12 +678,13 @@ function hasStrongIdentityMatch(target, candidate) {
   );
 }
 
-function autofillFields(savedFields, aliasModel) {
+function autofillFields(savedFields, aliasModel, adaptiveBaseThreshold = 0.82) {
   attachLearningListeners();
   cachedAliasModel = aliasModel || {};
 
   const nodes = Array.from(document.querySelectorAll("input, textarea, select"));
   const candidates = Array.isArray(savedFields) ? savedFields : [];
+  const now = Date.now();
 
   let filledCount = 0;
 
@@ -659,6 +716,7 @@ function autofillFields(savedFields, aliasModel) {
 
     let bestCandidate = null;
     let bestScore = 0;
+    let secondBestScore = 0;
 
     for (const candidate of candidates) {
       const candidateConcept = resolveFieldConcept(candidate, aliasModel || {});
@@ -699,8 +757,11 @@ function autofillFields(savedFields, aliasModel) {
       }
 
       if (score > bestScore) {
+        secondBestScore = bestScore;
         bestScore = score;
         bestCandidate = candidateForMatch;
+      } else if (score > secondBestScore) {
+        secondBestScore = score;
       }
     }
 
@@ -720,14 +781,40 @@ function autofillFields(savedFields, aliasModel) {
 
     const exactConceptMatch = isConceptMatch(targetConcept, bestConcept);
     const allowedToFill = strongIdentityMatch || exactConceptMatch;
+    const confidence = computeFillConfidence({
+      bestScore,
+      secondBestScore,
+      strongIdentityMatch,
+      exactConceptMatch,
+      hasTargetConcept: Boolean(targetConcept),
+      isUrlField: isLikelyUrlField(target),
+      isTypedSensitiveField: targetIsPhoneField || targetIsEmailField || targetIsCountryField
+    });
 
-    const value = allowedToFill && !conceptConflict && !conceptWeakForUrl && bestScore >= minimumScore ? bestCandidate?.value : null;
+    let minimumConfidence = clampNumber(Number(adaptiveBaseThreshold) || 0.82, 0.75, 0.95);
+    if (isLikelyUrlField(target)) {
+      minimumConfidence = Math.max(minimumConfidence, clampNumber(minimumConfidence + 0.06, 0.75, 0.95));
+    }
+    if (targetIsPhoneField || targetIsEmailField || targetIsCountryField) {
+      minimumConfidence = Math.max(minimumConfidence, clampNumber(minimumConfidence + 0.04, 0.75, 0.95));
+    }
+
+    const value =
+      allowedToFill &&
+      !conceptConflict &&
+      !conceptWeakForUrl &&
+      bestScore >= minimumScore &&
+      confidence >= minimumConfidence
+        ? bestCandidate?.value
+        : null;
 
     if (typeof value === "string" && value.length > 0) {
       autofillSessionState.set(element, {
         autofilledValue: value.trim(),
         canonicalConcept: bestCandidate?.canonicalConcept || target.canonicalConcept || "",
         aliasModel: aliasModel || {},
+        appliedAt: now,
+        feedbackSent: false,
         learned: false
       });
       applyValue(element, value);
@@ -746,7 +833,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     }
 
     if (message.action === "autofillFields") {
-      const filledCount = autofillFields(message.fields || [], message.aliasModel || {});
+      const adaptiveConfidenceThreshold = Number(message.adaptiveConfidenceThreshold);
+      const filledCount = autofillFields(
+        message.fields || [],
+        message.aliasModel || {},
+        Number.isFinite(adaptiveConfidenceThreshold) ? adaptiveConfidenceThreshold : 0.82
+      );
       sendResponse({ ok: true, filledCount });
       return;
     }

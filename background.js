@@ -3,20 +3,55 @@ const VAULT_META_KEY = "secureVaultMeta";
 const PASSPHRASE_SESSION_KEY = "vaultPassphrase";
 const ACTIVE_PROFILE_SESSION_KEY = "activeProfileName";
 const PROFILE_INDEX_KEY = "profileIndex";
-const SETTINGS_KEY = "extensionSettings";
 const PBKDF2_ITERATIONS = 250000;
-
-function defaultSettings() {
-  return {
-    learnFromManualInput: false
-  };
-}
 
 function defaultProfileData() {
   return {
     profileFields: [],
-    aliasModel: {}
+    aliasModel: {},
+    feedbackStats: {
+      weightedSuccess: 0,
+      weightedTotal: 0,
+      lastUpdated: Date.now()
+    }
   };
+}
+
+function normalizeFeedbackStats(stats) {
+  const weightedSuccess = Number(stats?.weightedSuccess) || 0;
+  const weightedTotal = Number(stats?.weightedTotal) || 0;
+  const lastUpdated = Number(stats?.lastUpdated) || Date.now();
+
+  return {
+    weightedSuccess: Math.max(0, weightedSuccess),
+    weightedTotal: Math.max(0, weightedTotal),
+    lastUpdated
+  };
+}
+
+function applyFeedbackDecay(stats, now = Date.now()) {
+  const current = normalizeFeedbackStats(stats);
+  const elapsedMs = Math.max(0, now - current.lastUpdated);
+  const elapsedDays = elapsedMs / (1000 * 60 * 60 * 24);
+  const halfLifeDays = 14;
+  const decay = Math.pow(0.5, elapsedDays / halfLifeDays);
+
+  return {
+    weightedSuccess: current.weightedSuccess * decay,
+    weightedTotal: current.weightedTotal * decay,
+    lastUpdated: now
+  };
+}
+
+function getAdaptiveConfidenceThreshold(feedbackStats) {
+  const decayed = applyFeedbackDecay(feedbackStats);
+  if (decayed.weightedTotal < 3) {
+    return 0.82;
+  }
+
+  const accuracy = decayed.weightedSuccess / decayed.weightedTotal;
+  const threshold = 0.78 + (1 - accuracy) * 0.18;
+  return Math.min(0.94, Math.max(0.78, threshold));
 }
 
 function defaultVault() {
@@ -45,27 +80,6 @@ async function getProfileIndex() {
 async function setProfileIndex(profileNames) {
   const normalized = Array.from(new Set((profileNames || []).map((name) => normalizeProfileName(name))));
   await chrome.storage.local.set({ [PROFILE_INDEX_KEY]: normalized.length > 0 ? normalized : ["default"] });
-}
-
-async function getSettings() {
-  const data = await chrome.storage.local.get(SETTINGS_KEY);
-  const saved = data[SETTINGS_KEY] && typeof data[SETTINGS_KEY] === "object"
-    ? data[SETTINGS_KEY]
-    : {};
-  return {
-    ...defaultSettings(),
-    ...saved
-  };
-}
-
-async function updateSettings(partialSettings) {
-  const current = await getSettings();
-  const next = {
-    ...current,
-    ...(partialSettings && typeof partialSettings === "object" ? partialSettings : {})
-  };
-  await chrome.storage.local.set({ [SETTINGS_KEY]: next });
-  return next;
 }
 
 async function getOrCreateMeta() {
@@ -186,7 +200,8 @@ function ensureVaultShape(vault) {
       const profileKey = normalizeProfileName(profileName);
       normalizedProfiles[profileKey] = {
         profileFields: Array.isArray(profileData?.profileFields) ? profileData.profileFields : [],
-        aliasModel: profileData?.aliasModel && typeof profileData.aliasModel === "object" ? profileData.aliasModel : {}
+        aliasModel: profileData?.aliasModel && typeof profileData.aliasModel === "object" ? profileData.aliasModel : {},
+        feedbackStats: normalizeFeedbackStats(profileData?.feedbackStats)
       };
     }
 
@@ -226,7 +241,8 @@ function ensureVaultShape(vault) {
     profiles: {
       default: {
         profileFields: migratedFields,
-        aliasModel: vault.aliasModel && typeof vault.aliasModel === "object" ? vault.aliasModel : {}
+        aliasModel: vault.aliasModel && typeof vault.aliasModel === "object" ? vault.aliasModel : {},
+        feedbackStats: normalizeFeedbackStats(vault.feedbackStats)
       }
     }
   };
@@ -367,16 +383,35 @@ async function getGlobalFields() {
   return {
     fields: profile.profileFields || [],
     aliasModel: profile.aliasModel || {},
+    adaptiveConfidenceThreshold: getAdaptiveConfidenceThreshold(profile.feedbackStats),
     activeProfile: profileName
   };
 }
 
-async function listProfiles() {
+async function recordFillFeedback(accepted) {
+  const passphrase = await getPassphrase();
+  if (!passphrase) {
+    return { recorded: false };
+  }
+
   const activeProfile = await getActiveProfileName();
-  const profiles = await getProfileIndex();
+  const vault = ensureVaultShape(await loadVault(passphrase));
+  const profileName = ensureProfile(vault, activeProfile);
+  const profile = vault.profiles[profileName];
+
+  const decayed = applyFeedbackDecay(profile.feedbackStats);
+  decayed.weightedTotal += 1;
+  if (accepted) {
+    decayed.weightedSuccess += 1;
+  }
+
+  profile.feedbackStats = decayed;
+  await saveVault(passphrase, vault);
+  await saveProfileIndexFromVault(vault);
+
   return {
-    profiles,
-    activeProfile
+    recorded: true,
+    adaptiveConfidenceThreshold: getAdaptiveConfidenceThreshold(profile.feedbackStats)
   };
 }
 
@@ -405,32 +440,6 @@ async function unlockVault(passphrase, requestedProfileName) {
 
   return {
     activeProfile: profileName,
-    profiles: Object.keys(vault.profiles)
-  };
-}
-
-async function switchProfile(profileName, createIfMissing = false) {
-  const passphrase = await getPassphrase();
-  if (!passphrase) {
-    throw new Error("Vault is locked. Unlock first.");
-  }
-
-  const normalizedName = normalizeProfileName(profileName);
-  const vault = ensureVaultShape(await loadVault(passphrase));
-
-  if (!vault.profiles[normalizedName]) {
-    if (!createIfMissing) {
-      throw new Error("Profile not found.");
-    }
-    vault.profiles[normalizedName] = defaultProfileData();
-    await saveVault(passphrase, vault);
-  }
-
-  await setActiveProfileName(normalizedName);
-  await saveProfileIndexFromVault(vault);
-
-  return {
-    activeProfile: normalizedName,
     profiles: Object.keys(vault.profiles)
   };
 }
@@ -466,23 +475,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           sendResponse({ ok: true, ...result });
           break;
         }
-        case "getSettings": {
-          const settings = await getSettings();
-          sendResponse({ ok: true, settings });
-          break;
-        }
-        case "updateSettings": {
-          const settings = await updateSettings(message.settings || {});
-          sendResponse({ ok: true, settings });
-          break;
-        }
-        case "listProfiles": {
-          const result = await listProfiles();
-          sendResponse({ ok: true, ...result });
-          break;
-        }
-        case "switchProfile": {
-          const result = await switchProfile(message.profileName, Boolean(message.createIfMissing));
+        case "recordFillFeedback": {
+          const result = await recordFillFeedback(Boolean(message.accepted));
           sendResponse({ ok: true, ...result });
           break;
         }

@@ -156,7 +156,8 @@ fillBtn.addEventListener("click", async () => {
   const result = await sendTabMessage(tab.id, {
     action: "autofillFields",
     fields: fieldsResp.fields,
-    aliasModel: fieldsResp.aliasModel || {}
+    aliasModel: fieldsResp.aliasModel || {},
+    adaptiveConfidenceThreshold: Number(fieldsResp.adaptiveConfidenceThreshold)
   });
 
   if (!result.ok) {

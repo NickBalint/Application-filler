@@ -24,7 +24,7 @@ The extension uses a lightweight local learning model (no cloud calls):
 - It treats common variants as equivalent (for example `phone`, `cell`, `mobile`, `telephone`).
 - It learns token-to-concept associations over time from fields you save.
 - After autofill, if you edit a filled field, it learns from your correction and saves that field/value mapping for future forms.
-- You can enable **Learn from manual typing** in the popup to also learn from fields you type yourself (even if they were not autofilled first).
+- It also learns from manual edits automatically, so corrections improve future autofill without needing a toggle.
 - Autofill picks the best candidate using concept + token similarity scoring.
 
 This gives you practical cross-site behavior, such as matching a saved phone value to fields labeled differently on another ATS.
@@ -55,16 +55,10 @@ Important:
 1. Open a job application page.
 2. Fill some fields manually.
 3. Click the extension icon.
-4. Choose a username from the dropdown (or create one).
+4. Enter a username.
 5. Enter a passphrase (8+ chars) and click **Unlock**.
 6. Click **Save Filled Fields**.
 7. On future application pages, click **Autofill This Page**.
-
-### Multiple Local Users
-
-1. Unlock once with any existing username profile.
-2. Enter a new username and click **Create**.
-3. Use **Switch User** to change the active profile.
 
 Each username has separate learned field mappings and values.
 
