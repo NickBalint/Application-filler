@@ -421,6 +421,34 @@ function isLikelyUrlField(target) {
   );
 }
 
+function getUrlFamilyFromText(value) {
+  const text = cleanText(value).toLowerCase();
+  if (!text) {
+    return "";
+  }
+
+  if (text.includes("linkedin.com")) {
+    return "linkedin";
+  }
+
+  if (text.includes("github.com")) {
+    return "github";
+  }
+
+  return "";
+}
+
+function getUrlFamilyFromField(target) {
+  const tokens = target?.tokens || [];
+  if (tokens.includes("linkedin")) {
+    return "linkedin";
+  }
+  if (tokens.includes("github")) {
+    return "github";
+  }
+  return "";
+}
+
 function hasStrongIdentityMatch(target, candidate) {
   if (!candidate) {
     return false;
@@ -466,11 +494,17 @@ function autofillFields(savedFields, aliasModel) {
       canonicalConcept: learning.canonicalConcept,
       tokens: learning.tokens
     };
+    const targetUrlFamily = isLikelyUrlField(target) ? getUrlFamilyFromField(target) : "";
 
     let bestCandidate = null;
     let bestScore = 0;
 
     for (const candidate of candidates) {
+      const candidateUrlFamily = getUrlFamilyFromText(candidate.value);
+      if (targetUrlFamily && candidateUrlFamily && targetUrlFamily !== candidateUrlFamily) {
+        continue;
+      }
+
       const score = computeMatchScore(target, candidate);
       if (score > bestScore) {
         bestScore = score;
