@@ -421,6 +421,99 @@ function isLikelyUrlField(target) {
   );
 }
 
+function isLikelyPhoneField(target) {
+  const fieldType = normalizeIdentity(target.type);
+  return (
+    fieldType === "tel" ||
+    (target.tokens || []).some((token) => ["phone", "cell", "mobile", "telephone", "tel"].includes(token))
+  );
+}
+
+function isLikelyEmailField(target) {
+  const fieldType = normalizeIdentity(target.type);
+  return (
+    fieldType === "email" ||
+    (target.tokens || []).some((token) => ["email", "mail", "e-mail"].includes(token))
+  );
+}
+
+function getConceptFamily(concept) {
+  if (!concept) {
+    return "";
+  }
+
+  if (concept === "phone") {
+    return "phone";
+  }
+  if (concept === "email") {
+    return "email";
+  }
+  if (concept === "first_name" || concept === "last_name" || concept === "full_name") {
+    return "name";
+  }
+  if (concept === "address" || concept === "city" || concept === "state" || concept === "zip" || concept === "country") {
+    return "location";
+  }
+
+  return concept;
+}
+
+function looksLikeEmailAddress(value) {
+  const text = cleanText(value);
+  if (!text) {
+    return false;
+  }
+
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(text);
+}
+
+function looksLikePersonName(value) {
+  const text = cleanText(value);
+  if (!text) {
+    return false;
+  }
+
+  if (/\d/.test(text)) {
+    return false;
+  }
+
+  if (looksLikeEmailAddress(text) || looksLikePhoneNumber(text)) {
+    return false;
+  }
+
+  return /^[A-Za-z][A-Za-z.'-]*(\s+[A-Za-z][A-Za-z.'-]*)+$/.test(text);
+}
+
+function resolveFieldConcept(field, aliasModel = {}) {
+  if (!field) {
+    return "";
+  }
+
+  if (field.canonicalConcept) {
+    return field.canonicalConcept;
+  }
+
+  return inferConcept(field, aliasModel).canonicalConcept;
+}
+
+function looksLikePhoneNumber(value) {
+  const text = cleanText(value);
+  if (!text) {
+    return false;
+  }
+
+  if (/^(yes|no|true|false)$/i.test(text)) {
+    return false;
+  }
+
+  const digitCount = (text.match(/\d/g) || []).length;
+  if (digitCount < 7) {
+    return false;
+  }
+
+  return /^[\d\s()+\-./ext]*$/i.test(text);
+}
+
 function getUrlFamilyFromText(value) {
   const text = cleanText(value).toLowerCase();
   if (!text) {
@@ -494,21 +587,61 @@ function autofillFields(savedFields, aliasModel) {
       canonicalConcept: learning.canonicalConcept,
       tokens: learning.tokens
     };
+    const targetConcept = resolveFieldConcept(target, aliasModel || {});
+    const targetFamily = getConceptFamily(targetConcept);
     const targetUrlFamily = isLikelyUrlField(target) ? getUrlFamilyFromField(target) : "";
+    const targetIsPhoneField = isLikelyPhoneField(target) || targetFamily === "phone";
+    const targetIsEmailField = isLikelyEmailField(target) || targetFamily === "email";
 
     let bestCandidate = null;
     let bestScore = 0;
 
     for (const candidate of candidates) {
+      const candidateConcept = resolveFieldConcept(candidate, aliasModel || {});
+      const candidateFamily = getConceptFamily(candidateConcept);
+
+      if (targetIsPhoneField && !looksLikePhoneNumber(candidate.value)) {
+        continue;
+      }
+
+      if (targetIsEmailField && !looksLikeEmailAddress(candidate.value)) {
+        continue;
+      }
+
+      if (targetFamily === "name") {
+        if (candidateFamily === "location" || candidateFamily === "phone" || candidateFamily === "email" || candidateFamily === "website") {
+          continue;
+        }
+
+        if (candidateFamily !== "name" && !looksLikePersonName(candidate.value)) {
+          continue;
+        }
+      }
+
       const candidateUrlFamily = getUrlFamilyFromText(candidate.value);
       if (targetUrlFamily && candidateUrlFamily && targetUrlFamily !== candidateUrlFamily) {
         continue;
       }
 
-      const score = computeMatchScore(target, candidate);
+      const candidateForMatch = {
+        ...candidate,
+        canonicalConcept: candidateConcept
+      };
+
+      let score = computeMatchScore(target, candidateForMatch);
+      if (targetIsPhoneField) {
+        score += 4;
+      }
+      if (targetIsEmailField) {
+        score += 4;
+      }
+      if (targetFamily === "name" && candidateFamily === "name") {
+        score += 2;
+      }
+
       if (score > bestScore) {
         bestScore = score;
-        bestCandidate = candidate;
+        bestCandidate = candidateForMatch;
       }
     }
 
@@ -517,14 +650,18 @@ function autofillFields(savedFields, aliasModel) {
       minimumScore = 5;
     }
 
-    if (target.canonicalConcept) {
+    if (targetConcept) {
       minimumScore = Math.max(minimumScore, 3.5);
+    }
+
+    if (targetIsPhoneField || targetIsEmailField) {
+      minimumScore = Math.min(minimumScore, 3);
     }
 
     const strongIdentityMatch = hasStrongIdentityMatch(target, bestCandidate);
     const bestConcept = bestCandidate?.canonicalConcept || "";
-    const conceptConflict = Boolean(target.canonicalConcept && bestConcept && target.canonicalConcept !== bestConcept);
-    const conceptWeakForUrl = isLikelyUrlField(target) && !strongIdentityMatch && !target.canonicalConcept;
+    const conceptConflict = Boolean(targetConcept && bestConcept && targetConcept !== bestConcept);
+    const conceptWeakForUrl = isLikelyUrlField(target) && !strongIdentityMatch && !targetConcept;
 
     const value = !conceptConflict && !conceptWeakForUrl && bestScore >= minimumScore ? bestCandidate?.value : null;
 
