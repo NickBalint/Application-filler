@@ -27,7 +27,7 @@ const CONCEPT_KEYWORDS = {
 const autofillSessionState = new WeakMap();
 const manualLearnState = new WeakMap();
 let learningListenersAttached = false;
-let manualLearningEnabled = false;
+let manualLearningEnabled = true;
 let cachedAliasModel = {};
 
 function cleanText(value) {
@@ -748,13 +748,6 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (message.action === "autofillFields") {
       const filledCount = autofillFields(message.fields || [], message.aliasModel || {});
       sendResponse({ ok: true, filledCount });
-      return;
-    }
-
-    if (message.action === "setManualLearning") {
-      manualLearningEnabled = Boolean(message.enabled);
-      attachLearningListeners();
-      sendResponse({ ok: true, enabled: manualLearningEnabled });
       return;
     }
 

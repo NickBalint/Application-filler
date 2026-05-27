@@ -83,29 +83,6 @@ select {
   grid-template-columns: 1fr;
 }
 
-.toggle-row {
-  margin-top: 12px;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  user-select: none;
-}
-
-.toggle-row input[type="checkbox"] {
-  width: 16px;
-  height: 16px;
-  margin: 0;
-}
-
-.toggle-row span {
-  font-size: 0.84rem;
-  color: var(--muted);
-}
-
-.toggle-row input:disabled + span {
-  color: #98a2b3;
-}
-
 button {
   border: none;
   border-radius: 8px;

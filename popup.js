@@ -4,7 +4,6 @@ const unlockBtn = document.getElementById("unlockBtn");
 const lockBtn = document.getElementById("lockBtn");
 const saveBtn = document.getElementById("saveBtn");
 const fillBtn = document.getElementById("fillBtn");
-const manualLearnToggle = document.getElementById("manualLearnToggle");
 const statusEl = document.getElementById("status");
 
 let isUnlocked = false;
@@ -47,28 +46,6 @@ async function getActiveTab() {
   return tabs[0];
 }
 
-async function syncManualLearningToActiveTab() {
-  const tab = await getActiveTab();
-  if (!tab?.id) {
-    return;
-  }
-
-  await sendTabMessage(tab.id, {
-    action: "setManualLearning",
-    enabled: Boolean(manualLearnToggle.checked)
-  });
-}
-
-async function refreshSettings() {
-  const response = await sendRuntimeMessage({ action: "getSettings" });
-  if (!response.ok) {
-    setStatus(response.error || "Failed to load settings.", true);
-    return;
-  }
-
-  manualLearnToggle.checked = Boolean(response.settings?.learnFromManualInput);
-}
-
 async function refreshLockState() {
   const response = await sendRuntimeMessage({ action: "isUnlocked" });
   const unlocked = Boolean(response?.ok && response.unlocked);
@@ -80,7 +57,6 @@ async function refreshLockState() {
   lockBtn.disabled = !unlocked;
   saveBtn.disabled = !unlocked;
   fillBtn.disabled = !unlocked;
-  manualLearnToggle.disabled = !unlocked;
 
   if (unlocked) {
     const activeProfile = normalizeUsername(response?.activeProfile || usernameInput.value || "default");
@@ -112,7 +88,6 @@ unlockBtn.addEventListener("click", async () => {
   passphraseInput.value = "";
   usernameInput.value = username;
   await refreshLockState();
-  await syncManualLearningToActiveTab();
 });
 
 lockBtn.addEventListener("click", async () => {
@@ -192,25 +167,6 @@ fillBtn.addEventListener("click", async () => {
   setStatus(`Autofilled ${result.filledCount} field(s).`);
 });
 
-manualLearnToggle.addEventListener("change", async () => {
-  const response = await sendRuntimeMessage({
-    action: "updateSettings",
-    settings: {
-      learnFromManualInput: Boolean(manualLearnToggle.checked)
-    }
-  });
-
-  if (!response.ok) {
-    setStatus(response.error || "Failed to update settings.", true);
-    return;
-  }
-
-  await syncManualLearningToActiveTab();
-  setStatus(manualLearnToggle.checked ? "Manual learning enabled." : "Manual learning disabled.");
-});
-
 document.addEventListener("DOMContentLoaded", async () => {
-  await refreshSettings();
   await refreshLockState();
-  await syncManualLearningToActiveTab();
 });
