@@ -4,11 +4,107 @@ const PASSPHRASE_SESSION_KEY = "vaultPassphrase";
 const ACTIVE_PROFILE_SESSION_KEY = "activeProfileName";
 const PROFILE_INDEX_KEY = "profileIndex";
 const PBKDF2_ITERATIONS = 250000;
+const MODEL_FEATURE_KEYS = [
+  "bestScore",
+  "scoreMargin",
+  "strongIdentityMatch",
+  "exactConceptMatch",
+  "hasTargetConcept",
+  "isUrlField",
+  "isTypedSensitiveField"
+];
+
+function defaultMlModel() {
+  return {
+    bias: -4.8,
+    weights: {
+      bestScore: 0.55,
+      scoreMargin: 0.9,
+      strongIdentityMatch: 1.5,
+      exactConceptMatch: 1.1,
+      hasTargetConcept: 0.4,
+      isUrlField: -0.2,
+      isTypedSensitiveField: 0.3
+    },
+    sampleCount: 0,
+    lastUpdated: Date.now()
+  };
+}
+
+function normalizeMlModel(model) {
+  const defaults = defaultMlModel();
+  const weights = {};
+
+  for (const key of MODEL_FEATURE_KEYS) {
+    const raw = Number(model?.weights?.[key]);
+    weights[key] = Number.isFinite(raw) ? raw : defaults.weights[key];
+  }
+
+  const bias = Number(model?.bias);
+  const sampleCount = Number(model?.sampleCount);
+  const lastUpdated = Number(model?.lastUpdated);
+
+  return {
+    bias: Number.isFinite(bias) ? bias : defaults.bias,
+    weights,
+    sampleCount: Number.isFinite(sampleCount) ? Math.max(0, sampleCount) : 0,
+    lastUpdated: Number.isFinite(lastUpdated) ? lastUpdated : Date.now()
+  };
+}
+
+function applyMlModelDecay(model, now = Date.now()) {
+  const current = normalizeMlModel(model);
+  const elapsedMs = Math.max(0, now - current.lastUpdated);
+  const elapsedDays = elapsedMs / (1000 * 60 * 60 * 24);
+  const halfLifeDays = 45;
+  const decay = Math.pow(0.5, elapsedDays / halfLifeDays);
+
+  const weights = {};
+  for (const key of MODEL_FEATURE_KEYS) {
+    weights[key] = current.weights[key] * decay;
+  }
+
+  return {
+    ...current,
+    weights,
+    lastUpdated: now
+  };
+}
+
+function applyMlFeedback(model, features, accepted) {
+  const current = applyMlModelDecay(model);
+  const label = accepted ? 1 : 0;
+
+  const featureVector = {};
+  for (const key of MODEL_FEATURE_KEYS) {
+    const raw = Number(features?.[key]);
+    featureVector[key] = Number.isFinite(raw) ? raw : 0;
+  }
+
+  let logit = current.bias;
+  for (const key of MODEL_FEATURE_KEYS) {
+    logit += current.weights[key] * featureVector[key];
+  }
+
+  const prediction = 1 / (1 + Math.exp(-logit));
+  const error = label - prediction;
+  const adaptiveRate = 0.02 / (1 + current.sampleCount / 400);
+
+  for (const key of MODEL_FEATURE_KEYS) {
+    current.weights[key] += adaptiveRate * error * featureVector[key];
+  }
+  current.bias += adaptiveRate * error;
+  current.sampleCount += 1;
+  current.lastUpdated = Date.now();
+
+  return current;
+}
 
 function defaultProfileData() {
   return {
     profileFields: [],
     aliasModel: {},
+    mlModel: defaultMlModel(),
     feedbackStats: {
       weightedSuccess: 0,
       weightedTotal: 0,
@@ -174,6 +270,9 @@ function sanitizeField(field) {
   const tokens = Array.isArray(field.tokens)
     ? field.tokens.filter((token) => typeof token === "string" && token.length > 1)
     : [];
+  const contextTokens = Array.isArray(field.contextTokens)
+    ? field.contextTokens.filter((token) => typeof token === "string" && token.length > 1)
+    : [];
 
   return {
     key: field.key,
@@ -181,9 +280,12 @@ function sanitizeField(field) {
     id: field.id || "",
     selector: field.selector || "",
     label: field.label || "",
+    autocomplete: field.autocomplete || "",
+    context: field.context || "",
     type: field.type || "",
     canonicalConcept: field.canonicalConcept || "",
     tokens: Array.from(new Set(tokens)),
+    contextTokens: Array.from(new Set(contextTokens)),
     value: field.value,
     updatedAt: Date.now()
   };
@@ -201,6 +303,7 @@ function ensureVaultShape(vault) {
       normalizedProfiles[profileKey] = {
         profileFields: Array.isArray(profileData?.profileFields) ? profileData.profileFields : [],
         aliasModel: profileData?.aliasModel && typeof profileData.aliasModel === "object" ? profileData.aliasModel : {},
+        mlModel: normalizeMlModel(profileData?.mlModel),
         feedbackStats: normalizeFeedbackStats(profileData?.feedbackStats)
       };
     }
@@ -242,6 +345,7 @@ function ensureVaultShape(vault) {
       default: {
         profileFields: migratedFields,
         aliasModel: vault.aliasModel && typeof vault.aliasModel === "object" ? vault.aliasModel : {},
+        mlModel: normalizeMlModel(vault.mlModel),
         feedbackStats: normalizeFeedbackStats(vault.feedbackStats)
       }
     }
@@ -383,12 +487,13 @@ async function getGlobalFields() {
   return {
     fields: profile.profileFields || [],
     aliasModel: profile.aliasModel || {},
+    mlModel: normalizeMlModel(profile.mlModel),
     adaptiveConfidenceThreshold: getAdaptiveConfidenceThreshold(profile.feedbackStats),
     activeProfile: profileName
   };
 }
 
-async function recordFillFeedback(accepted) {
+async function recordFillFeedback(accepted, features) {
   const passphrase = await getPassphrase();
   if (!passphrase) {
     return { recorded: false };
@@ -406,11 +511,13 @@ async function recordFillFeedback(accepted) {
   }
 
   profile.feedbackStats = decayed;
+  profile.mlModel = applyMlFeedback(profile.mlModel, features, accepted);
   await saveVault(passphrase, vault);
   await saveProfileIndexFromVault(vault);
 
   return {
     recorded: true,
+    mlModel: normalizeMlModel(profile.mlModel),
     adaptiveConfidenceThreshold: getAdaptiveConfidenceThreshold(profile.feedbackStats)
   };
 }
@@ -476,7 +583,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           break;
         }
         case "recordFillFeedback": {
-          const result = await recordFillFeedback(Boolean(message.accepted));
+          const result = await recordFillFeedback(Boolean(message.accepted), message.features || {});
           sendResponse({ ok: true, ...result });
           break;
         }

@@ -157,6 +157,7 @@ fillBtn.addEventListener("click", async () => {
     action: "autofillFields",
     fields: fieldsResp.fields,
     aliasModel: fieldsResp.aliasModel || {},
+    mlModel: fieldsResp.mlModel || null,
     adaptiveConfidenceThreshold: Number(fieldsResp.adaptiveConfidenceThreshold)
   });
 

@@ -5,7 +5,9 @@ const IGNORED_INPUT_TYPES = new Set([
   "image",
   "hidden",
   "file",
-  "password"
+  "password",
+  "checkbox",
+  "radio"
 ]);
 
 const CONCEPT_KEYWORDS = {
@@ -135,6 +137,30 @@ function fieldKey(element) {
   return buildSelector(element).toLowerCase();
 }
 
+function getFieldContextText(element) {
+  if (!element) {
+    return "";
+  }
+
+  const parts = [];
+  const scopedContainer = element.closest("fieldset, section, [role='group'], .section, .form-section, .group, .question");
+
+  if (scopedContainer) {
+    const legendText = scopedContainer.querySelector("legend")?.textContent || "";
+    const headingText = scopedContainer.querySelector("h1, h2, h3, h4, h5, h6, .section-title, .group-title")?.textContent || "";
+    const ariaLabel = scopedContainer.getAttribute("aria-label") || "";
+    parts.push(legendText, headingText, ariaLabel);
+  }
+
+  const closestForm = element.closest("form");
+  if (closestForm) {
+    const formHeading = closestForm.querySelector("h1, h2, h3")?.textContent || "";
+    parts.push(formHeading);
+  }
+
+  return cleanText(parts.join(" "));
+}
+
 function buildFieldMeta(element) {
   return {
     name: cleanText(element.name || ""),
@@ -142,14 +168,17 @@ function buildFieldMeta(element) {
     label: getLabelText(element),
     placeholder: cleanText(element.placeholder || ""),
     autocomplete: cleanText(element.getAttribute("autocomplete") || ""),
+    context: getFieldContextText(element),
     type: cleanText(element.type || element.tagName || "")
   };
 }
 
 function inferConcept(meta, aliasModel = {}) {
+  const contextTokens = tokenizeText(meta.context);
+
   const tokens = Array.from(
     new Set(
-      [meta.name, meta.id, meta.label, meta.placeholder, meta.autocomplete, meta.type]
+      [meta.name, meta.id, meta.label, meta.placeholder, meta.autocomplete, meta.type, meta.context]
         .flatMap((part) => tokenizeText(part))
     )
   );
@@ -190,7 +219,8 @@ function inferConcept(meta, aliasModel = {}) {
 
   return {
     canonicalConcept: bestScore >= 3 ? bestConcept : "",
-    tokens
+    tokens,
+    contextTokens
   };
 }
 
@@ -229,9 +259,12 @@ function collectFilledFields() {
       id: meta.id,
       selector: buildSelector(element),
       label: meta.label,
+      autocomplete: meta.autocomplete,
+      context: meta.context,
       type: meta.type,
       canonicalConcept: learning.canonicalConcept,
       tokens: learning.tokens,
+      contextTokens: learning.contextTokens,
       value
     });
   }
@@ -239,20 +272,91 @@ function collectFilledFields() {
   return fields;
 }
 
+function normalizeValueForComparison(value, concept, fieldType) {
+  const text = cleanText(value);
+  if (!text) {
+    return "";
+  }
+
+  const type = normalizeIdentity(fieldType);
+  if (concept === "phone" || type === "tel") {
+    return text.replace(/\D/g, "");
+  }
+
+  if (concept === "email" || type === "email") {
+    return text.toLowerCase();
+  }
+
+  if (concept === "country") {
+    return normalizeIdentity(text);
+  }
+
+  if (concept === "linkedin" || concept === "github" || concept === "website" || type === "url") {
+    const normalized = text.toLowerCase().replace(/\/+$/, "");
+    return normalized;
+  }
+
+  return normalizeIdentity(text);
+}
+
+function resolveSelectOptionValue(selectElement, rawValue) {
+  const desired = normalizeIdentity(rawValue);
+  if (!desired) {
+    return null;
+  }
+
+  const options = Array.from(selectElement.options || []);
+  if (options.length === 0) {
+    return null;
+  }
+
+  const exactValue = options.find((option) => normalizeIdentity(option.value) === desired);
+  if (exactValue) {
+    return exactValue.value;
+  }
+
+  const exactText = options.find((option) => normalizeIdentity(option.textContent) === desired);
+  if (exactText) {
+    return exactText.value;
+  }
+
+  const containsText = options.find((option) => {
+    const optionText = normalizeIdentity(option.textContent);
+    return optionText && (optionText.includes(desired) || desired.includes(optionText));
+  });
+  if (containsText) {
+    return containsText.value;
+  }
+
+  return null;
+}
+
 function applyValue(element, value) {
+  let finalValue = value;
+
+  if (element instanceof HTMLSelectElement) {
+    const matchedOptionValue = resolveSelectOptionValue(element, value);
+    if (!matchedOptionValue) {
+      return null;
+    }
+    finalValue = matchedOptionValue;
+  }
+
   const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")?.set;
   const nativeTextAreaValueSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value")?.set;
 
   if (element instanceof HTMLInputElement && nativeInputValueSetter) {
-    nativeInputValueSetter.call(element, value);
+    nativeInputValueSetter.call(element, finalValue);
   } else if (element instanceof HTMLTextAreaElement && nativeTextAreaValueSetter) {
-    nativeTextAreaValueSetter.call(element, value);
+    nativeTextAreaValueSetter.call(element, finalValue);
   } else {
-    element.value = value;
+    element.value = finalValue;
   }
 
   element.dispatchEvent(new Event("input", { bubbles: true }));
   element.dispatchEvent(new Event("change", { bubbles: true }));
+
+  return typeof element.value === "string" ? element.value : finalValue;
 }
 
 function attachLearningListeners() {
@@ -274,10 +378,12 @@ function attachLearningListeners() {
 
     if (state && !state.learned) {
       const elapsedSinceAutofill = Math.max(0, Date.now() - Number(state.appliedAt || 0));
+      const currentNormalized = normalizeValueForComparison(currentValue, state.canonicalConcept, element.type || element.tagName);
+      const autofilledNormalized = normalizeValueForComparison(state.autofilledValue, state.canonicalConcept, element.type || element.tagName);
 
-      if (currentValue === state.autofilledValue) {
+      if (currentNormalized && currentNormalized === autofilledNormalized) {
         if (!state.feedbackSent && event.type === "blur" && elapsedSinceAutofill >= 1200) {
-          sendFillFeedback(true);
+          sendFillFeedback(true, state.feedbackFeatures || {});
           autofillSessionState.set(element, {
             ...state,
             feedbackSent: true
@@ -294,9 +400,12 @@ function attachLearningListeners() {
         id: meta.id,
         selector: buildSelector(element),
         label: meta.label,
+        autocomplete: meta.autocomplete,
+        context: meta.context,
         type: meta.type,
         canonicalConcept: learning.canonicalConcept || state.canonicalConcept || "",
         tokens: learning.tokens,
+        contextTokens: learning.contextTokens,
         value: currentValue
       };
 
@@ -307,7 +416,7 @@ function attachLearningListeners() {
         },
         () => {
           if (!state.feedbackSent) {
-            sendFillFeedback(false);
+            sendFillFeedback(false, state.feedbackFeatures || {});
           }
           autofillSessionState.set(element, {
             ...state,
@@ -333,9 +442,12 @@ function attachLearningListeners() {
       id: meta.id,
       selector: buildSelector(element),
       label: meta.label,
+      autocomplete: meta.autocomplete,
+      context: meta.context,
       type: meta.type,
       canonicalConcept: learning.canonicalConcept,
       tokens: learning.tokens,
+      contextTokens: learning.contextTokens,
       value: currentValue
     };
 
@@ -410,14 +522,79 @@ function computeFillConfidence({
   return sigmoid(logit);
 }
 
+function normalizeMlModel(model) {
+  if (!model || typeof model !== "object") {
+    return null;
+  }
+
+  const bias = Number(model.bias);
+  const weights = model.weights && typeof model.weights === "object" ? model.weights : {};
+
+  return {
+    bias: Number.isFinite(bias) ? bias : -4.8,
+    weights: {
+      bestScore: Number.isFinite(Number(weights.bestScore)) ? Number(weights.bestScore) : 0.55,
+      scoreMargin: Number.isFinite(Number(weights.scoreMargin)) ? Number(weights.scoreMargin) : 0.9,
+      strongIdentityMatch: Number.isFinite(Number(weights.strongIdentityMatch)) ? Number(weights.strongIdentityMatch) : 1.5,
+      exactConceptMatch: Number.isFinite(Number(weights.exactConceptMatch)) ? Number(weights.exactConceptMatch) : 1.1,
+      hasTargetConcept: Number.isFinite(Number(weights.hasTargetConcept)) ? Number(weights.hasTargetConcept) : 0.4,
+      isUrlField: Number.isFinite(Number(weights.isUrlField)) ? Number(weights.isUrlField) : -0.2,
+      isTypedSensitiveField: Number.isFinite(Number(weights.isTypedSensitiveField)) ? Number(weights.isTypedSensitiveField) : 0.3
+    }
+  };
+}
+
+function buildConfidenceFeatures({
+  bestScore,
+  secondBestScore,
+  strongIdentityMatch,
+  exactConceptMatch,
+  hasTargetConcept,
+  isUrlField,
+  isTypedSensitiveField
+}) {
+  return {
+    bestScore,
+    scoreMargin: Math.max(0, bestScore - secondBestScore),
+    strongIdentityMatch: strongIdentityMatch ? 1 : 0,
+    exactConceptMatch: exactConceptMatch ? 1 : 0,
+    hasTargetConcept: hasTargetConcept ? 1 : 0,
+    isUrlField: isUrlField ? 1 : 0,
+    isTypedSensitiveField: isTypedSensitiveField ? 1 : 0
+  };
+}
+
+function computeModelConfidence(features, mlModel) {
+  const model = normalizeMlModel(mlModel);
+  if (!model) {
+    return computeFillConfidence({
+      bestScore: Number(features.bestScore) || 0,
+      secondBestScore: Math.max(0, (Number(features.bestScore) || 0) - (Number(features.scoreMargin) || 0)),
+      strongIdentityMatch: Boolean(features.strongIdentityMatch),
+      exactConceptMatch: Boolean(features.exactConceptMatch),
+      hasTargetConcept: Boolean(features.hasTargetConcept),
+      isUrlField: Boolean(features.isUrlField),
+      isTypedSensitiveField: Boolean(features.isTypedSensitiveField)
+    });
+  }
+
+  let logit = model.bias;
+  for (const [key, weight] of Object.entries(model.weights)) {
+    logit += weight * (Number(features[key]) || 0);
+  }
+
+  return sigmoid(logit);
+}
+
 function clampNumber(value, min, max) {
   return Math.min(max, Math.max(min, value));
 }
 
-function sendFillFeedback(accepted) {
+function sendFillFeedback(accepted, features = {}) {
   chrome.runtime.sendMessage({
     action: "recordFillFeedback",
-    accepted: Boolean(accepted)
+    accepted: Boolean(accepted),
+    features
   });
 }
 
@@ -440,6 +617,10 @@ function computeMatchScore(target, candidate) {
   const candidateName = normalizeIdentity(candidate.name);
   const targetId = normalizeIdentity(target.id);
   const candidateId = normalizeIdentity(candidate.id);
+  const targetAutocomplete = normalizeIdentity(target.autocomplete);
+  const candidateAutocomplete = normalizeIdentity(candidate.autocomplete);
+  const targetContext = normalizeIdentity(target.context);
+  const candidateContext = normalizeIdentity(candidate.context);
 
   if (targetName && candidateName) {
     if (targetName === candidateName) {
@@ -464,6 +645,24 @@ function computeMatchScore(target, candidate) {
   if (target.type && candidate.type && target.type === candidate.type) {
     score += 1;
   }
+
+  if (targetAutocomplete && candidateAutocomplete) {
+    if (targetAutocomplete === candidateAutocomplete) {
+      score += 3;
+    } else if (targetAutocomplete.includes(candidateAutocomplete) || candidateAutocomplete.includes(targetAutocomplete)) {
+      score += 1.5;
+    }
+  }
+
+  if (targetContext && candidateContext) {
+    if (targetContext === candidateContext) {
+      score += 3;
+    } else if (targetContext.includes(candidateContext) || candidateContext.includes(targetContext)) {
+      score += 1.5;
+    }
+  }
+
+  score += jaccardSimilarity(target.contextTokens, candidate.contextTokens) * 3;
 
   score += jaccardSimilarity(target.tokens, candidate.tokens) * 4;
   return score;
@@ -678,7 +877,7 @@ function hasStrongIdentityMatch(target, candidate) {
   );
 }
 
-function autofillFields(savedFields, aliasModel, adaptiveBaseThreshold = 0.82) {
+function autofillFields(savedFields, aliasModel, adaptiveBaseThreshold = 0.82, mlModel = null) {
   attachLearningListeners();
   cachedAliasModel = aliasModel || {};
 
@@ -703,9 +902,12 @@ function autofillFields(savedFields, aliasModel, adaptiveBaseThreshold = 0.82) {
       key: fieldKey(element),
       name: meta.name,
       id: meta.id,
+      autocomplete: meta.autocomplete,
+      context: meta.context,
       type: meta.type,
       canonicalConcept: learning.canonicalConcept,
-      tokens: learning.tokens
+      tokens: learning.tokens,
+      contextTokens: learning.contextTokens
     };
     const targetConcept = resolveFieldConcept(target, aliasModel || {});
     const targetFamily = getConceptFamily(targetConcept);
@@ -781,7 +983,7 @@ function autofillFields(savedFields, aliasModel, adaptiveBaseThreshold = 0.82) {
 
     const exactConceptMatch = isConceptMatch(targetConcept, bestConcept);
     const allowedToFill = strongIdentityMatch || exactConceptMatch;
-    const confidence = computeFillConfidence({
+    const confidenceFeatures = buildConfidenceFeatures({
       bestScore,
       secondBestScore,
       strongIdentityMatch,
@@ -790,6 +992,7 @@ function autofillFields(savedFields, aliasModel, adaptiveBaseThreshold = 0.82) {
       isUrlField: isLikelyUrlField(target),
       isTypedSensitiveField: targetIsPhoneField || targetIsEmailField || targetIsCountryField
     });
+    const confidence = computeModelConfidence(confidenceFeatures, mlModel);
 
     let minimumConfidence = clampNumber(Number(adaptiveBaseThreshold) || 0.82, 0.75, 0.95);
     if (isLikelyUrlField(target)) {
@@ -809,15 +1012,20 @@ function autofillFields(savedFields, aliasModel, adaptiveBaseThreshold = 0.82) {
         : null;
 
     if (typeof value === "string" && value.length > 0) {
+      const appliedValue = applyValue(element, value);
+      if (typeof appliedValue !== "string" || appliedValue.length === 0) {
+        continue;
+      }
+
       autofillSessionState.set(element, {
-        autofilledValue: value.trim(),
+        autofilledValue: appliedValue.trim(),
         canonicalConcept: bestCandidate?.canonicalConcept || target.canonicalConcept || "",
         aliasModel: aliasModel || {},
         appliedAt: now,
         feedbackSent: false,
+        feedbackFeatures: confidenceFeatures,
         learned: false
       });
-      applyValue(element, value);
       filledCount += 1;
     }
   }
@@ -837,7 +1045,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       const filledCount = autofillFields(
         message.fields || [],
         message.aliasModel || {},
-        Number.isFinite(adaptiveConfidenceThreshold) ? adaptiveConfidenceThreshold : 0.82
+        Number.isFinite(adaptiveConfidenceThreshold) ? adaptiveConfidenceThreshold : 0.82,
+        message.mlModel || null
       );
       sendResponse({ ok: true, filledCount });
       return;
