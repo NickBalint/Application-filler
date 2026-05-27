@@ -467,6 +467,56 @@ function looksLikeEmailAddress(value) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(text);
 }
 
+let countryValueSet;
+
+function getCountryValueSet() {
+  if (countryValueSet) {
+    return countryValueSet;
+  }
+
+  const values = new Set([
+    "us",
+    "usa",
+    "u.s.",
+    "u.s.a.",
+    "unitedstates",
+    "unitedstatesofamerica",
+    "uk",
+    "u.k.",
+    "unitedkingdom"
+  ]);
+
+  if (typeof Intl !== "undefined" && typeof Intl.supportedValuesOf === "function" && typeof Intl.DisplayNames === "function") {
+    try {
+      const regionCodes = Intl.supportedValuesOf("region");
+      const displayNames = new Intl.DisplayNames(["en"], { type: "region" });
+
+      for (const code of regionCodes) {
+        values.add(normalizeIdentity(code));
+
+        const name = displayNames.of(code);
+        if (name) {
+          values.add(normalizeIdentity(name));
+        }
+      }
+    } catch (_error) {
+      // Fallback to the built-in aliases above if the runtime does not expose region names.
+    }
+  }
+
+  countryValueSet = values;
+  return countryValueSet;
+}
+
+function looksLikeCountryName(value) {
+  const text = normalizeIdentity(value);
+  if (!text) {
+    return false;
+  }
+
+  return getCountryValueSet().has(text);
+}
+
 function looksLikePersonName(value) {
   const text = cleanText(value);
   if (!text) {
@@ -496,6 +546,14 @@ function resolveFieldConcept(field, aliasModel = {}) {
   return inferConcept(field, aliasModel).canonicalConcept;
 }
 
+function isConceptMatch(targetConcept, candidateConcept) {
+  if (!targetConcept || !candidateConcept) {
+    return false;
+  }
+
+  return targetConcept === candidateConcept;
+}
+
 function looksLikePhoneNumber(value) {
   const text = cleanText(value);
   if (!text) {
@@ -507,11 +565,16 @@ function looksLikePhoneNumber(value) {
   }
 
   const digitCount = (text.match(/\d/g) || []).length;
-  if (digitCount < 7) {
+  if (digitCount < 7 || digitCount > 15) {
     return false;
   }
 
-  return /^[\d\s()+\-./ext]*$/i.test(text);
+  const normalized = text.replace(/(?:ext\.?|extension|x)\s*\d*$/i, "");
+  if (!/^[\d\s()+\-./extx]*$/i.test(normalized)) {
+    return false;
+  }
+
+  return true;
 }
 
 function getUrlFamilyFromText(value) {
@@ -589,6 +652,7 @@ function autofillFields(savedFields, aliasModel) {
     };
     const targetConcept = resolveFieldConcept(target, aliasModel || {});
     const targetFamily = getConceptFamily(targetConcept);
+    const targetIsCountryField = targetConcept === "country" || (target.tokens || []).some((token) => ["country", "nation"].includes(token));
     const targetUrlFamily = isLikelyUrlField(target) ? getUrlFamilyFromField(target) : "";
     const targetIsPhoneField = isLikelyPhoneField(target) || targetFamily === "phone";
     const targetIsEmailField = isLikelyEmailField(target) || targetFamily === "email";
@@ -598,7 +662,10 @@ function autofillFields(savedFields, aliasModel) {
 
     for (const candidate of candidates) {
       const candidateConcept = resolveFieldConcept(candidate, aliasModel || {});
-      const candidateFamily = getConceptFamily(candidateConcept);
+
+      if (!hasStrongIdentityMatch(target, candidate) && !isConceptMatch(targetConcept, candidateConcept)) {
+        continue;
+      }
 
       if (targetIsPhoneField && !looksLikePhoneNumber(candidate.value)) {
         continue;
@@ -608,14 +675,12 @@ function autofillFields(savedFields, aliasModel) {
         continue;
       }
 
-      if (targetFamily === "name") {
-        if (candidateFamily === "location" || candidateFamily === "phone" || candidateFamily === "email" || candidateFamily === "website") {
-          continue;
-        }
+      if (targetIsCountryField && !looksLikeCountryName(candidate.value)) {
+        continue;
+      }
 
-        if (candidateFamily !== "name" && !looksLikePersonName(candidate.value)) {
-          continue;
-        }
+      if (targetFamily === "name" && !looksLikePersonName(candidate.value)) {
+        continue;
       }
 
       const candidateUrlFamily = getUrlFamilyFromText(candidate.value);
@@ -629,14 +694,8 @@ function autofillFields(savedFields, aliasModel) {
       };
 
       let score = computeMatchScore(target, candidateForMatch);
-      if (targetIsPhoneField) {
-        score += 4;
-      }
-      if (targetIsEmailField) {
-        score += 4;
-      }
-      if (targetFamily === "name" && candidateFamily === "name") {
-        score += 2;
+      if (hasStrongIdentityMatch(target, candidateForMatch)) {
+        score += 6;
       }
 
       if (score > bestScore) {
@@ -645,17 +704,13 @@ function autofillFields(savedFields, aliasModel) {
       }
     }
 
-    let minimumScore = 3;
+    let minimumScore = 6;
     if (isLikelyUrlField(target)) {
-      minimumScore = 5;
-    }
-
-    if (targetConcept) {
-      minimumScore = Math.max(minimumScore, 3.5);
+      minimumScore = 7;
     }
 
     if (targetIsPhoneField || targetIsEmailField) {
-      minimumScore = Math.min(minimumScore, 3);
+      minimumScore = Math.max(minimumScore, 7);
     }
 
     const strongIdentityMatch = hasStrongIdentityMatch(target, bestCandidate);
@@ -663,7 +718,10 @@ function autofillFields(savedFields, aliasModel) {
     const conceptConflict = Boolean(targetConcept && bestConcept && targetConcept !== bestConcept);
     const conceptWeakForUrl = isLikelyUrlField(target) && !strongIdentityMatch && !targetConcept;
 
-    const value = !conceptConflict && !conceptWeakForUrl && bestScore >= minimumScore ? bestCandidate?.value : null;
+    const exactConceptMatch = isConceptMatch(targetConcept, bestConcept);
+    const allowedToFill = strongIdentityMatch || exactConceptMatch;
+
+    const value = allowedToFill && !conceptConflict && !conceptWeakForUrl && bestScore >= minimumScore ? bestCandidate?.value : null;
 
     if (typeof value === "string" && value.length > 0) {
       autofillSessionState.set(element, {
